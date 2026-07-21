@@ -1,0 +1,75 @@
+version: "3.9"
+
+# Run this on a small dedicated monitoring EC2 instance (or the Jenkins box
+# if you're keeping costs down for a learning project).
+#
+#   docker compose -f monitoring/docker-compose.yml up -d
+#
+# Grafana:    http://<monitoring-ec2-ip>:3000  (default admin/admin, change it)
+# Prometheus: http://<monitoring-ec2-ip>:9090
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: changeme
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+  # Container-level metrics (CPU/mem per container) for anything running on
+  # this box - useful if you also run Jenkins agents here.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    restart: unless-stopped
+    ports:
+      - "8085:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+
+  # Host-level metrics (CPU/mem/disk) for the EC2 instance itself.
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+
+  # Pulls ECS/Fargate + ALB metrics from CloudWatch into Prometheus format,
+  # so the same Grafana dashboards can show app-level (ALB 5xx, latency,
+  # ECS CPU/mem) metrics alongside host/container metrics.
+  cloudwatch-exporter:
+    image: prom/cloudwatch-exporter:latest
+    container_name: cloudwatch-exporter
+    restart: unless-stopped
+    volumes:
+      - ./cloudwatch-exporter-config.yml:/config/config.yml:ro
+      - ~/.aws:/root/.aws:ro
+    environment:
+      AWS_REGION: ap-south-1
+    command: ["/config/config.yml"]
+    ports:
+      - "9106:9106"
+
+volumes:
+  prometheus_data:
+  grafana_data:
