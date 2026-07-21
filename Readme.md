@@ -1,7 +1,6 @@
 # CartForge on AWS — a full CI/CD pipeline, step by step
+<img width="937" height="593" alt="image" src="https://github.com/user-attachments/assets/a8fe0a96-d19e-4552-bb76-a21166aa6b43" />
 
-This is a beginner-friendly walkthrough for turning the CartForge React app
-into an industry-style pipeline on AWS:
 
 **GitHub → Jenkins (build + Gitleaks + Trivy) → ECR → CodeDeploy canary → ECS Fargate → ALB → users**,
 with CloudWatch-triggered automatic rollback and Prometheus/Grafana monitoring.
