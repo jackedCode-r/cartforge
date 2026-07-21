@@ -1,0 +1,15 @@
+version: 1
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        TaskDefinition: "<TASK_DEFINITION_ARN>"   # filled in by Jenkins at deploy time
+        LoadBalancerInfo:
+          ContainerName: "cartforge"
+          ContainerPort: 80
+# Optional lifecycle hooks (each points at a Lambda that validates the
+# deployment and calls back to CodeDeploy). Uncomment once you've created
+# validation Lambdas - not required to get canary + rollback working.
+# Hooks:
+#   - BeforeAllowTraffic: "cartforge-pre-traffic-hook"
+#   - AfterAllowTraffic: "cartforge-post-traffic-hook"

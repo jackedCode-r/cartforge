@@ -1,0 +1,29 @@
+{
+  "family": "cartforge-task",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "cartforge",
+      "image": "123456789012.dkr.ecr.ap-south-1.amazonaws.com/cartforge:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 80,
+          "protocol": "tcp"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/cartforge",
+          "awslogs-region": "ap-south-1",
+          "awslogs-stream-prefix": "cartforge"
+        }
+      }
+    }
+  ]
+}

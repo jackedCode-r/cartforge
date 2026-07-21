@@ -1,0 +1,13 @@
+title = "CartForge gitleaks config"
+
+# Use gitleaks' built-in default rules, plus this allowlist for known
+# false positives in the CartForge repo (e.g. demo/example values).
+[allowlist]
+description = "Ignore demo/example values that look like secrets but aren't"
+paths = [
+  '''\.env\.example$''',
+  '''README\.md$''',
+]
+regexes = [
+  '''opsmate''',   # demo default passwords used only in local docker-compose
+]
