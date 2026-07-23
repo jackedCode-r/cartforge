@@ -4,10 +4,10 @@
 # This is NOT meant to be run top-to-bottom blindly.
 set -euo pipefail
 
-AWS_REGION="ap-south-1"
-VPC_ID="vpc-xxxxxxxx"
-SUBNET_IDS="subnet-aaaa,subnet-bbbb"
-SG_ID="sg-xxxxxxxx"
+AWS_REGION="us-east-1"
+VPC_ID="vpc-06df35f7d668b64a1"
+SUBNET_IDS="subnet-0b4b36ab3e084c5f2,subnet-0b5fed250cf90265a,subnet-03842953cc80edc98"
+SG_ID="sg-0a53e7118605951de"
 CLUSTER_NAME="cartforge-cluster"
 SERVICE_NAME="cartforge-service"
 ALB_NAME="cartforge-alb"

@@ -4,11 +4,11 @@
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "256",
   "memory": "512",
-  "executionRoleArn": "arn:aws:iam::123456789012:role/ecsTaskExecutionRole",
+  "executionRoleArn": "arn:aws:iam::256097482448:role/ecsTaskExecutionRole",
   "containerDefinitions": [
     {
       "name": "cartforge",
-      "image": "123456789012.dkr.ecr.ap-south-1.amazonaws.com/cartforge:latest",
+      "image": "256097482448.dkr.ecr.us-east-1.amazonaws.com/cartforge:latest",
       "essential": true,
       "portMappings": [
         {
@@ -20,7 +20,7 @@
         "logDriver": "awslogs",
         "options": {
           "awslogs-group": "/ecs/cartforge",
-          "awslogs-region": "ap-south-1",
+          "awslogs-region": "us-east-1",
           "awslogs-stream-prefix": "cartforge"
         }
       }

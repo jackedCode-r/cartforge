@@ -2,30 +2,37 @@
 
 You'll use `ssh-copy-id` in two places:
 
-1. From your **laptop** to the **Jenkins master EC2** (connect it using the .pem key )
-
+1. From your Laptop to the Jenkins Master EC2
+2. From the Jenkins Master EC2 to the Jenkins Agent EC2
+Note: This method is commonly used in training environments. Once the connection is working, you can later switch to passwordless SSH (ssh-copy-id), which is the recommended approach for Jenkins.
 ---
 
 ## 1. Laptop -> Jenkins master EC2
+Step 1: Connect using the .pem key
+ssh -i jenkins-master.pem ubuntu@<MASTER_PUBLIC_IP>
 connect it 
 ---
 
-## 2. Jenkins master EC2 -> Jenkins agent EC2
-Launch a second, smaller EC2 instance to act as the build agent (keeps heavy
-`npm ci` / `docker build` / `trivy scan` work off the master). On the
-**Jenkins master**, generate a dedicated key pair just for talking to agents:
+## 2. Enable Password Authentication
+**Jenkins node **, 
 
 login in to the agent server 
 Open the SSH configuration file:
 sudo nano /etc/ssh/sshd_config
 Make sure this setting exists:
 PubkeyAuthentication yes
+PasswordAuthentication yes
 Also make sure this line is not disabled:
 AuthorizedKeysFile .ssh/authorized_keys
 
 save and exit and restart the server 
 ```bash
 sudo systemctl restart ssh
+```
+
+# Set Password for Ubuntu User
+```bash
+sudo passwd ubuntu
 ```
 on the master server 
 ```bash
@@ -46,6 +53,17 @@ Test from the Jenkins user:
 sudo -u jenkins ssh ubuntu@<AGENT_EC2_PRIVATE_IP> "echo connected"
 ```
 
+if its still not work 
+# trouble shoting 
+root@ip-172-31-33-190:~# sudo sshd -T | grep passwordauthentication
+passwordauthentication no
+
+if its says now then its men that it is added somewhere 
+then edit this file 
+nano  /etc/ssh/sshd_config.d/60-cloudimg-settings.conf 
+and make it yes 
+
+and then restart your ssh and try again 
 ---
 
 ## 3. Register the agent in Jenkins

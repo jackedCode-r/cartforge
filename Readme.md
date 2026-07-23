@@ -44,7 +44,7 @@ console and you can `ssh -i key.pem ubuntu@<ip>` into each one.
 
 ---
 
-## Phase 2 — Set up passwordless SSH (`ssh-copy-id`)
+## Phase 2 — Set up  SSH (`ssh-copy-id`)
 
 Full commands are in **`scripts/ssh-setup-notes.md`**. Short version:
 
@@ -84,6 +84,7 @@ At the end it prints Jenkins' initial admin password. Open
 - Amazon ECR
 - Pipeline: AWS Steps / AWS Credentials
 - SSH Build Agents
+- Pipeline stage view 
 
 **✅ Check:** Jenkins UI loads, login works, plugins show installed.
 
@@ -101,7 +102,7 @@ Jenkins can reach the agent without any password stored in plain text.
 
 ## Phase 5 — Set up AWS resources (ECR, ECS, ALB, CodeDeploy)
 
-This is the biggest one-time setup phase. `ecs/provision-reference-commands.sh`
+This is the biggest one-time setup phase. `aws/aws-resources.sh`
 has every command — go through it top to bottom, filling in your own VPC,
 subnet, and security group IDs as you go (it's commented so you know what's
 a placeholder). It creates, in order:
