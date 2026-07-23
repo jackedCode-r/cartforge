@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Idempotent provisioning script - safe to run top-to-bottom, and safe to
-# re-run after a partial failure. Every resource is checked first; it's
-# only created if it doesn't already exist. ARNs (target groups, listener,
-# IAM roles, ECR URI, account ID) are looked up automatically instead of
-# being hardcoded as placeholders.
+# Idempotent provisioning script - no CodeDeploy (not available on AWS
+# Educate / some free-tier student accounts). Uses a single target group
+# and plain ECS rolling deployments with the built-in deployment circuit
+# breaker for automatic rollback instead.
+# Safe to run top-to-bottom, and safe to re-run after a partial failure -
+# every resource is checked first and only created if it doesn't exist.
 #
 # Usage:
 #   aws configure   # once, with your access key / secret / region
@@ -23,21 +24,17 @@ ECR_REPO_NAME="cartforge"
 TASK_FAMILY="cartforge-task"
 CONTAINER_NAME="cartforge"
 CONTAINER_PORT=80
-TG_BLUE_NAME="cartforge-tg-blue"
-TG_GREEN_NAME="cartforge-tg-green"
-CODEDEPLOY_APP="cartforge-app"
-CODEDEPLOY_GROUP="cartforge-deployment-group"
-CODEDEPLOY_CONFIG="CodeDeployDefault.ECSCanary10Percent5Minutes"
+TG_NAME="cartforge-tg"
 ALARM_NAME="cartforge-5xx-alarm"
 EXEC_ROLE_NAME="ecsTaskExecutionRole"
-DEPLOY_ROLE_NAME="CodeDeployECSRole"
-TASKDEF_TEMPLATE="taskdef.json"   # must contain a placeholder "<IMAGE_URI>" for the image field
+TASKDEF_TEMPLATE="taskdef.json"
 
 log()  { echo -e "\033[1;34m==>\033[0m $*" >&2; }
 ok()   { echo -e "\033[1;32m[skip, exists]\033[0m $*" >&2; }
 made() { echo -e "\033[1;33m[created]\033[0m $*" >&2; }
+
 # ---------------------------------------------------------------------------
-# 0. Resolve account ID up front - everything else derives from this
+# 0. Resolve account ID up front
 # ---------------------------------------------------------------------------
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
 log "AWS account: $AWS_ACCOUNT_ID | region: $AWS_REGION"
@@ -57,7 +54,7 @@ ECR_URI=$(aws ecr describe-repositories --repository-names "$ECR_REPO_NAME" \
 echo "    URI: $ECR_URI"
 
 # ---------------------------------------------------------------------------
-# 2. IAM roles (ecsTaskExecutionRole, CodeDeployECSRole)
+# 2. IAM role - only ecsTaskExecutionRole is needed now (no CodeDeployECSRole)
 # ---------------------------------------------------------------------------
 log "IAM role: $EXEC_ROLE_NAME"
 if aws iam get-role --role-name "$EXEC_ROLE_NAME" >/dev/null 2>&1; then
@@ -78,25 +75,6 @@ else
 fi
 EXEC_ROLE_ARN=$(aws iam get-role --role-name "$EXEC_ROLE_NAME" --query 'Role.Arn' --output text)
 
-log "IAM role: $DEPLOY_ROLE_NAME"
-if aws iam get-role --role-name "$DEPLOY_ROLE_NAME" >/dev/null 2>&1; then
-    ok "IAM role $DEPLOY_ROLE_NAME"
-else
-    aws iam create-role --role-name "$DEPLOY_ROLE_NAME" \
-        --assume-role-policy-document '{
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Effect": "Allow",
-                "Principal": {"Service": "codedeploy.amazonaws.com"},
-                "Action": "sts:AssumeRole"
-            }]
-        }' >/dev/null
-    aws iam attach-role-policy --role-name "$DEPLOY_ROLE_NAME" \
-        --policy-arn arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS
-    made "IAM role $DEPLOY_ROLE_NAME"
-fi
-DEPLOY_ROLE_ARN=$(aws iam get-role --role-name "$DEPLOY_ROLE_NAME" --query 'Role.Arn' --output text)
-
 # ---------------------------------------------------------------------------
 # 3. ECS cluster
 # ---------------------------------------------------------------------------
@@ -111,27 +89,21 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Target groups (blue & green)
+# 4. Single target group (no blue/green pair needed without CodeDeploy)
 # ---------------------------------------------------------------------------
-create_target_group_if_missing() {
-    local NAME=$1
-    if aws elbv2 describe-target-groups --names "$NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
-        ok "Target group $NAME"
-    else
-        aws elbv2 create-target-group \
-            --name "$NAME" --protocol HTTP --port "$CONTAINER_PORT" \
-            --vpc-id "$VPC_ID" --target-type ip \
-            --health-check-path "/health" \
-            --region "$AWS_REGION" >/dev/null
-        made "Target group $NAME"
-    fi
-    aws elbv2 describe-target-groups --names "$NAME" --region "$AWS_REGION" \
-        --query 'TargetGroups[0].TargetGroupArn' --output text
-}
-
-log "Target groups: $TG_BLUE_NAME / $TG_GREEN_NAME"
-TG_BLUE_ARN=$(create_target_group_if_missing "$TG_BLUE_NAME")
-TG_GREEN_ARN=$(create_target_group_if_missing "$TG_GREEN_NAME")
+log "Target group: $TG_NAME"
+if aws elbv2 describe-target-groups --names "$TG_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+    ok "Target group $TG_NAME"
+else
+    aws elbv2 create-target-group \
+        --name "$TG_NAME" --protocol HTTP --port "$CONTAINER_PORT" \
+        --vpc-id "$VPC_ID" --target-type ip \
+        --health-check-path "/health" \
+        --region "$AWS_REGION" >/dev/null
+    made "Target group $TG_NAME"
+fi
+TG_ARN=$(aws elbv2 describe-target-groups --names "$TG_NAME" --region "$AWS_REGION" \
+    --query 'TargetGroups[0].TargetGroupArn' --output text)
 
 # ---------------------------------------------------------------------------
 # 5. Application Load Balancer + listener
@@ -152,10 +124,9 @@ ALB_ARN=$(aws elbv2 describe-load-balancers --names "$ALB_NAME" --region "$AWS_R
     --query 'LoadBalancers[0].LoadBalancerArn' --output text)
 ALB_DNS=$(aws elbv2 describe-load-balancers --names "$ALB_NAME" --region "$AWS_REGION" \
     --query 'LoadBalancers[0].DNSName' --output text)
-# ARN suffix is everything after the account ID segment, e.g. app/cartforge-alb/1234567890abcdef
 ALB_ARN_SUFFIX=$(echo "$ALB_ARN" | sed -E 's#.*(app/[^/]+/[^/]+)$#\1#')
 
-log "Listener on $ALB_NAME (port 80 -> $TG_BLUE_NAME)"
+log "Listener on $ALB_NAME (port 80 -> $TG_NAME)"
 LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" --region "$AWS_REGION" \
     --query "Listeners[?Port==\`80\`].ListenerArn | [0]" --output text 2>/dev/null || echo "None")
 if [ "$LISTENER_ARN" != "None" ] && [ -n "$LISTENER_ARN" ]; then
@@ -163,14 +134,13 @@ if [ "$LISTENER_ARN" != "None" ] && [ -n "$LISTENER_ARN" ]; then
 else
     LISTENER_ARN=$(aws elbv2 create-listener \
         --load-balancer-arn "$ALB_ARN" --protocol HTTP --port 80 \
-        --default-actions "Type=forward,TargetGroupArn=$TG_BLUE_ARN" \
+        --default-actions "Type=forward,TargetGroupArn=$TG_ARN" \
         --region "$AWS_REGION" --query 'Listeners[0].ListenerArn' --output text)
     made "Listener on port 80"
 fi
 
 echo "    ALB DNS:        $ALB_DNS"
 echo "    ALB ARN suffix: $ALB_ARN_SUFFIX"
-echo "    Listener ARN:   $LISTENER_ARN"
 
 # ---------------------------------------------------------------------------
 # 6. ECS task definition (patched with the real image URI + execution role)
@@ -200,7 +170,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. ECS service (CodeDeploy-controlled, blue/green)
+# 7. ECS service - plain rolling deployment, with the deployment circuit
+#    breaker enabled. This is the automatic-rollback mechanism: if the new
+#    tasks fail to reach a stable healthy state, ECS itself reverts the
+#    service to the previous task definition. No CodeDeploy required.
 # ---------------------------------------------------------------------------
 log "ECS service: $SERVICE_NAME"
 SERVICE_STATUS=$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" \
@@ -216,15 +189,18 @@ else
         --task-definition "$TASK_DEF_ARN" \
         --desired-count 2 \
         --launch-type FARGATE \
-        --deployment-controller type=CODE_DEPLOY \
         --network-configuration "$NETWORK_CONFIG" \
-        --load-balancers "targetGroupArn=$TG_BLUE_ARN,containerName=$CONTAINER_NAME,containerPort=$CONTAINER_PORT" \
+        --load-balancers "targetGroupArn=$TG_ARN,containerName=$CONTAINER_NAME,containerPort=$CONTAINER_PORT" \
+        --deployment-configuration "deploymentCircuitBreaker={enable=true,rollback=true},maximumPercent=200,minimumHealthyPercent=100" \
         --region "$AWS_REGION" >/dev/null
     made "ECS service $SERVICE_NAME"
 fi
 
 # ---------------------------------------------------------------------------
-# 8. CloudWatch alarm (rollback trigger)
+# 8. CloudWatch alarm - informational only now (no CodeDeploy to react to
+#    it automatically). Set up an SNS topic + email subscription if you
+#    want to be paged when it fires; otherwise just watch it in the console
+#    during Phase 9-style failure tests.
 # ---------------------------------------------------------------------------
 log "CloudWatch alarm: $ALARM_NAME"
 ALARM_EXISTS=$(aws cloudwatch describe-alarms --alarm-names "$ALARM_NAME" --region "$AWS_REGION" \
@@ -248,41 +224,6 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 9. CodeDeploy application
-# ---------------------------------------------------------------------------
-log "CodeDeploy application: $CODEDEPLOY_APP"
-if aws deploy get-application --application-name "$CODEDEPLOY_APP" --region "$AWS_REGION" >/dev/null 2>&1; then
-    ok "CodeDeploy application $CODEDEPLOY_APP"
-else
-    aws deploy create-application \
-        --application-name "$CODEDEPLOY_APP" \
-        --compute-platform ECS \
-        --region "$AWS_REGION" >/dev/null
-    made "CodeDeploy application $CODEDEPLOY_APP"
-fi
-
-# ---------------------------------------------------------------------------
-# 10. CodeDeploy deployment group (canary + alarm + auto-rollback)
-# ---------------------------------------------------------------------------
-log "CodeDeploy deployment group: $CODEDEPLOY_GROUP"
-if aws deploy get-deployment-group --application-name "$CODEDEPLOY_APP" \
-    --deployment-group-name "$CODEDEPLOY_GROUP" --region "$AWS_REGION" >/dev/null 2>&1; then
-    ok "CodeDeploy deployment group $CODEDEPLOY_GROUP"
-else
-    aws deploy create-deployment-group \
-        --application-name "$CODEDEPLOY_APP" \
-        --deployment-group-name "$CODEDEPLOY_GROUP" \
-        --deployment-config-name "$CODEDEPLOY_CONFIG" \
-        --service-role-arn "$DEPLOY_ROLE_ARN" \
-        --ecs-services "clusterName=$CLUSTER_NAME,serviceName=$SERVICE_NAME" \
-        --auto-rollback-configuration "enabled=true,events=DEPLOYMENT_FAILURE,DEPLOYMENT_STOP_ON_ALARM" \
-        --alarm-configuration "enabled=true,alarms=[{name=$ALARM_NAME}]" \
-        --load-balancer-info "targetGroupPairInfoList=[{targetGroups=[{name=$TG_BLUE_NAME},{name=$TG_GREEN_NAME}],prodTrafficRoute={listenerArns=[$LISTENER_ARN]}}]" \
-        --region "$AWS_REGION" >/dev/null
-    made "CodeDeploy deployment group $CODEDEPLOY_GROUP"
-fi
-
-# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -293,10 +234,7 @@ echo " AWS_ACCOUNT_ID   = $AWS_ACCOUNT_ID"
 echo " ECR_URI          = $ECR_URI"
 echo " ALB_DNS          = $ALB_DNS"
 echo " ALB_ARN_SUFFIX   = $ALB_ARN_SUFFIX"
-echo " LISTENER_ARN     = $LISTENER_ARN"
-echo " TG_BLUE_ARN      = $TG_BLUE_ARN"
-echo " TG_GREEN_ARN     = $TG_GREEN_ARN"
+echo " TG_ARN           = $TG_ARN"
 echo " EXEC_ROLE_ARN    = $EXEC_ROLE_ARN"
-echo " DEPLOY_ROLE_ARN  = $DEPLOY_ROLE_ARN"
 echo " TASK_DEF_ARN     = $TASK_DEF_ARN"
 echo "=================================================================="

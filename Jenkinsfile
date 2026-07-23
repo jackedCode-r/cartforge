@@ -1,32 +1,16 @@
 pipeline {
-    agent any
-
-    parameters {
-        booleanParam(
-            name: 'USE_DOCKER',
-            defaultValue: true,
-            description: 'If true: build image, scan, push to ECR, deploy to ECS via CodeDeploy canary. If false: only install, build, and run the security/quality checks (useful for quick PR validation, no deployment).'
-        )
-    }
-
-    // ------------------------------------------------------------------
-    // Fill these in (Manage Jenkins > System, or as environment vars on
-    // the agent). None of these are secrets except the two credentials
-    // referenced below via Jenkins Credentials, which are never printed.
-    // ------------------------------------------------------------------
     environment {
-        AWS_REGION            = 'ap-south-1'
-        AWS_ACCOUNT_ID        = '123456789012'
-        ECR_REPO              = 'cartforge'
-        IMAGE_TAG             = "${env.BUILD_NUMBER}"
-        ECR_URI               = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
-        ECS_CLUSTER           = 'cartforge-cluster'
-        ECS_SERVICE           = 'cartforge-service'
-        CODEDEPLOY_APP        = 'cartforge-app'
-        CODEDEPLOY_GROUP      = 'cartforge-deployment-group'
-        TASK_DEF_FAMILY       = 'cartforge-task'
-        CONTAINER_NAME        = 'cartforge'
+        APP_DIR         = 'cartforge'
+        AWS_REGION      = 'us-east-1'
+        AWS_ACCOUNT_ID  = '256097482448'
+        ECR_REPO        = 'cartforge'
+        IMAGE_TAG       = "${env.BUILD_NUMBER}"
+        ECR_URI         = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+        ECS_CLUSTER     = 'cartforge-cluster'
+        ECS_SERVICE     = 'cartforge-service'
+        TASK_DEF_FAMILY = 'cartforge-task'
     }
+    agent any
 
     options {
         timestamps()
@@ -38,14 +22,14 @@ pipeline {
 
         stage('Checkout') {
             steps {
-                checkout scm
+                 git branch: 'main', url: 'https://github.com/mantu0tech/cartforge.git'
             }
         }
 
-        // --------------------------------------------------------------
-        // Secret scanning FIRST, before anything is built or pushed.
-        // Fails the build if any secret/API key is found in the repo.
-        // --------------------------------------------------------------
+        // Secret scanning covers the WHOLE repo (aws/, scripts/, security/,
+        // cartforge/ - everything) since a leaked key could land in any
+        // folder, not just the app code. Runs before anything is built or
+        // pushed anywhere.
         stage('Gitleaks - secret scan') {
             steps {
                 sh '''
@@ -61,27 +45,29 @@ pipeline {
             }
         }
 
+        // Everything below this point that touches the app runs inside
+        // dir("${APP_DIR}") - so `npm ci` reads cartforge/package.json,
+        // not a (nonexistent) one at the repo root.
         stage('Install & Build (npm)') {
             steps {
-                sh '''
-                    npm ci
-                    npm run build
-                '''
+                dir("${APP_DIR}") {
+                    sh '''
+                        npm ci
+                        npm run build
+                    '''
+                }
             }
         }
 
         stage('Docker Build') {
-            when { expression { params.USE_DOCKER } }
             steps {
-                sh "docker build -t ${ECR_REPO}:${IMAGE_TAG} ."
+                dir("${APP_DIR}") {
+                    sh "docker build -t ${ECR_REPO}:${IMAGE_TAG} ."
+                }
             }
         }
 
-        // --------------------------------------------------------------
-        // Vulnerability scan on the built image. Fails on HIGH/CRITICAL.
-        // --------------------------------------------------------------
         stage('Trivy - image scan') {
-            when { expression { params.USE_DOCKER } }
             steps {
                 sh '''
                     docker run --rm \
@@ -94,7 +80,6 @@ pipeline {
         }
 
         stage('Push to ECR') {
-            when { expression { params.USE_DOCKER } }
             steps {
                 withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-creds']]) {
                     sh '''
@@ -111,8 +96,24 @@ pipeline {
             }
         }
 
+        stage('Record current task definition (rollback target)') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-creds']]) {
+                    sh '''
+                        CURRENT_ARN=$(aws ecs describe-services \
+                            --cluster ${ECS_CLUSTER} --services ${ECS_SERVICE} \
+                            --region ${AWS_REGION} \
+                            --query 'services[0].taskDefinition' --output text 2>/dev/null || echo "NONE")
+
+                        echo "$CURRENT_ARN" > previous-task-def-arn.txt
+                        echo "Current (previous) task definition: $CURRENT_ARN"
+                    '''
+                }
+                archiveArtifacts artifacts: 'previous-task-def-arn.txt'
+            }
+        }
+
         stage('Register new ECS task definition') {
-            when { expression { params.USE_DOCKER } }
             steps {
                 withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-creds']]) {
                     sh '''
@@ -120,6 +121,7 @@ pipeline {
 
                         aws ecs describe-task-definition \
                             --task-definition ${TASK_DEF_FAMILY} \
+                            --region ${AWS_REGION} \
                             --query 'taskDefinition' > current-task-def.json
 
                         jq --arg IMAGE "$NEW_IMAGE" \
@@ -130,62 +132,44 @@ pipeline {
                            current-task-def.json > new-task-def.json
 
                         aws ecs register-task-definition \
-                            --cli-input-json file://new-task-def.json > registered-task-def.json
+                            --cli-input-json file://new-task-def.json \
+                            --region ${AWS_REGION} > registered-task-def.json
 
                         NEW_ARN=$(jq -r '.taskDefinition.taskDefinitionArn' registered-task-def.json)
-                        echo "$NEW_ARN" > task-def-arn.txt
+                        echo "$NEW_ARN" > new-task-def-arn.txt
                         echo "Registered: $NEW_ARN"
                     '''
                 }
             }
         }
 
-        // --------------------------------------------------------------
-        // Canary deployment through CodeDeploy. The deployment config
-        // (e.g. CodeDeployDefault.ECSCanary10Percent5Minutes) shifts 10%
-        // of traffic first, waits, then shifts the rest - or rolls back
-        // automatically if the CloudWatch alarm attached to the
-        // deployment group fires.
-        // --------------------------------------------------------------
-        stage('Deploy - CodeDeploy canary') {
-            when { expression { params.USE_DOCKER } }
+        stage('Deploy to ECS (rolling + circuit breaker)') {
             steps {
                 withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-creds']]) {
                     sh '''
-                        NEW_ARN=$(cat task-def-arn.txt)
+                        NEW_ARN=$(cat new-task-def-arn.txt)
 
-                        cat > appspec.json <<EOF
-{
-  "version": 1,
-  "Resources": [
-    {
-      "TargetService": {
-        "Type": "AWS::ECS::Service",
-        "Properties": {
-          "TaskDefinition": "${NEW_ARN}",
-          "LoadBalancerInfo": {
-            "ContainerName": "${CONTAINER_NAME}",
-            "ContainerPort": 80
-          }
+                        aws ecs update-service \
+                            --cluster ${ECS_CLUSTER} \
+                            --service ${ECS_SERVICE} \
+                            --task-definition "$NEW_ARN" \
+                            --deployment-configuration "deploymentCircuitBreaker={enable=true,rollback=true},maximumPercent=200,minimumHealthyPercent=100" \
+                            --region ${AWS_REGION} > /dev/null
+
+                        echo "Deployment started with task definition: $NEW_ARN"
+                    '''
+                }
+            }
         }
-      }
-    }
-  ]
-}
-EOF
 
-                        aws deploy create-deployment \
-                            --application-name ${CODEDEPLOY_APP} \
-                            --deployment-group-name ${CODEDEPLOY_GROUP} \
-                            --revision revisionType=AppSpecContent,appSpecContent="{content=\\"$(cat appspec.json | sed 's/"/\\\\"/g')\\"}" \
-                            --description "Build #${BUILD_NUMBER} via Jenkins" \
-                            > deployment.json
-
-                        DEPLOYMENT_ID=$(jq -r '.deploymentId' deployment.json)
-                        echo "Deployment started: $DEPLOYMENT_ID"
-                        echo "$DEPLOYMENT_ID" > deployment-id.txt
-
-                        aws deploy wait deployment-successful --deployment-id "$DEPLOYMENT_ID"
+        stage('Wait for service to stabilize') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-creds']]) {
+                    sh '''
+                        aws ecs wait services-stable \
+                            --cluster ${ECS_CLUSTER} \
+                            --services ${ECS_SERVICE} \
+                            --region ${AWS_REGION}
                     '''
                 }
             }
@@ -194,24 +178,36 @@ EOF
 
     post {
         success {
-            echo "Build #${env.BUILD_NUMBER} deployed successfully via canary release."
+            echo "Build #${env.BUILD_NUMBER} deployed successfully to ECS."
         }
         failure {
-            // If the deployment stage itself failed, CodeDeploy's own
-            // alarm-based rollback usually already reverted ECS. This is
-            // a belt-and-braces manual stop, safe to run even if there's
-            // nothing in progress.
-            withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-creds']]) {
-                sh '''
-                    if [ -f deployment-id.txt ]; then
-                        DEPLOYMENT_ID=$(cat deployment-id.txt)
-                        aws deploy stop-deployment \
-                            --deployment-id "$DEPLOYMENT_ID" \
-                            --auto-rollback-enabled || true
-                    fi
-                '''
+            script {
+                if (fileExists('previous-task-def-arn.txt')) {
+                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-creds']]) {
+                        sh '''
+                            PREVIOUS_ARN=$(cat previous-task-def-arn.txt)
+                            if [ "$PREVIOUS_ARN" != "NONE" ] && [ -n "$PREVIOUS_ARN" ]; then
+                                echo "Rolling back ${ECS_SERVICE} to $PREVIOUS_ARN"
+                                aws ecs update-service \
+                                    --cluster ${ECS_CLUSTER} \
+                                    --service ${ECS_SERVICE} \
+                                    --task-definition "$PREVIOUS_ARN" \
+                                    --region ${AWS_REGION} > /dev/null
+
+                                aws ecs wait services-stable \
+                                    --cluster ${ECS_CLUSTER} \
+                                    --services ${ECS_SERVICE} \
+                                    --region ${AWS_REGION} || true
+                            else
+                                echo "No previous task definition recorded - nothing to roll back to (likely the first-ever deployment)."
+                            fi
+                        '''
+                    }
+                }
             }
-            echo "Pipeline failed - CodeDeploy auto-rollback should restore the previous task definition."
+            echo "Pipeline failed - rolled back ${ECS_SERVICE} to the previous task definition."
         }
     }
 }
+
+
