@@ -167,7 +167,42 @@ else
         --region "$AWS_REGION" --query 'Listeners[0].ListenerArn' --output text)
     made "Listener on port 80"
 fi
+TEST_LISTENER_ARN=$(aws elbv2 describe-listeners \
+    --load-balancer-arn "$ALB_ARN" \
+    --region "$AWS_REGION" \
+    --query "Listeners[?Port==\`8080\`].ListenerArn | [0]" \
+    --output text 2>/dev/null || echo "None")
 
+if [ "$TEST_LISTENER_ARN" = "None" ] || [ -z "$TEST_LISTENER_ARN" ]; then
+    TEST_LISTENER_ARN=$(aws elbv2 create-listener \
+        --load-balancer-arn "$ALB_ARN" \
+        --protocol HTTP \
+        --port 8080 \
+        --default-actions "Type=forward,TargetGroupArn=$TG_GREEN_ARN" \
+        --region "$AWS_REGION" \
+        --query 'Listeners[0].ListenerArn' \
+        --output text)
+
+    made "Test listener on port 8080"
+fi
+TEST_LISTENER_ARN=$(aws elbv2 describe-listeners \
+    --load-balancer-arn "$ALB_ARN" \
+    --region "$AWS_REGION" \
+    --query "Listeners[?Port==\`8080\`].ListenerArn | [0]" \
+    --output text 2>/dev/null || echo "None")
+
+if [ "$TEST_LISTENER_ARN" = "None" ] || [ -z "$TEST_LISTENER_ARN" ]; then
+    TEST_LISTENER_ARN=$(aws elbv2 create-listener \
+        --load-balancer-arn "$ALB_ARN" \
+        --protocol HTTP \
+        --port 8080 \
+        --default-actions "Type=forward,TargetGroupArn=$TG_GREEN_ARN" \
+        --region "$AWS_REGION" \
+        --query 'Listeners[0].ListenerArn' \
+        --output text)
+
+    made "Test listener on port 8080"
+fi
 echo "    ALB DNS:        $ALB_DNS"
 echo "    ALB ARN suffix: $ALB_ARN_SUFFIX"
 echo "    Listener ARN:   $LISTENER_ARN"
@@ -262,24 +297,38 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 10. CodeDeploy deployment group (canary + alarm + auto-rollback)
+# 10. CodeDeploy deployment group (canary + blue/green + rollback)
 # ---------------------------------------------------------------------------
 log "CodeDeploy deployment group: $CODEDEPLOY_GROUP"
-if aws deploy get-deployment-group --application-name "$CODEDEPLOY_APP" \
-    --deployment-group-name "$CODEDEPLOY_GROUP" --region "$AWS_REGION" >/dev/null 2>&1; then
+
+if aws deploy get-deployment-group \
+    --application-name "$CODEDEPLOY_APP" \
+    --deployment-group-name "$CODEDEPLOY_GROUP" \
+    --region "$AWS_REGION" >/dev/null 2>&1; then
+
     ok "CodeDeploy deployment group $CODEDEPLOY_GROUP"
+
 else
+
     aws deploy create-deployment-group \
         --application-name "$CODEDEPLOY_APP" \
         --deployment-group-name "$CODEDEPLOY_GROUP" \
         --deployment-config-name "$CODEDEPLOY_CONFIG" \
+        --deployment-style deploymentType=BLUE_GREEN,deploymentOption=WITH_TRAFFIC_CONTROL \
         --service-role-arn "$DEPLOY_ROLE_ARN" \
-        --ecs-services "clusterName=$CLUSTER_NAME,serviceName=$SERVICE_NAME" \
-        --auto-rollback-configuration "enabled=true,events=DEPLOYMENT_FAILURE,DEPLOYMENT_STOP_ON_ALARM" \
-        --alarm-configuration "enabled=true,alarms=[{name=$ALARM_NAME}]" \
-        --load-balancer-info "targetGroupPairInfoList=[{targetGroups=[{name=$TG_BLUE_NAME},{name=$TG_GREEN_NAME}],prodTrafficRoute={listenerArns=[$LISTENER_ARN]}}]" \
-        --region "$AWS_REGION" >/dev/null
+        --ecs-services clusterName="$CLUSTER_NAME",serviceName="$SERVICE_NAME" \
+        --load-balancer-info \
+"targetGroupPairInfoList=[{targetGroups=[{name=$TG_BLUE_NAME},{name=$TG_GREEN_NAME}],prodTrafficRoute={listenerArns=[$LISTENER_ARN]},testTrafficRoute={listenerArns=[$TEST_LISTENER_ARN]}}]" \
+    --blue-green-deployment-configuration \
+"deploymentReadyOption={actionOnTimeout=CONTINUE_DEPLOYMENT},terminateBlueInstancesOnDeploymentSuccess={action=TERMINATE,terminationWaitTimeInMinutes=5}" \
+    --auto-rollback-configuration \
+"enabled=true,events=DEPLOYMENT_FAILURE,DEPLOYMENT_STOP_ON_ALARM" \
+    --alarm-configuration \
+"enabled=true,alarms=[{name=$ALARM_NAME}]" \
+    --region "$AWS_REGION"
+
     made "CodeDeploy deployment group $CODEDEPLOY_GROUP"
+
 fi
 
 # ---------------------------------------------------------------------------

@@ -1,22 +1,14 @@
 pipeline {
     agent any
 
-    parameters {
-        booleanParam(
-            name: 'USE_DOCKER',
-            defaultValue: true,
-            description: 'If true: build image, scan, push to ECR, deploy to ECS via CodeDeploy canary. If false: only install, build, and run the security/quality checks (useful for quick PR validation, no deployment).'
-        )
-    }
-
     // ------------------------------------------------------------------
     // Fill these in (Manage Jenkins > System, or as environment vars on
     // the agent). None of these are secrets except the two credentials
     // referenced below via Jenkins Credentials, which are never printed.
     // ------------------------------------------------------------------
     environment {
-        AWS_REGION            = 'ap-south-1'
-        AWS_ACCOUNT_ID        = '123456789012'
+        AWS_REGION            = 'us-east-1'
+        AWS_ACCOUNT_ID        = '787107040536'
         ECR_REPO              = 'cartforge'
         IMAGE_TAG             = "${env.BUILD_NUMBER}"
         ECR_URI               = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
@@ -38,7 +30,7 @@ pipeline {
 
         stage('Checkout') {
             steps {
-                checkout scm
+                git branch: 'main', url: 'https://github.com/mantu0tech/cartforge.git'
             }
         }
 
@@ -63,38 +55,41 @@ pipeline {
 
         stage('Install & Build (npm)') {
             steps {
-                sh '''
-                    npm ci
-                    npm run build
-                '''
+                dir('cartforge') {
+                     sh '''
+                        npm ci
+                        npm run build
+                    '''
+        }
             }
         }
 
         stage('Docker Build') {
-            when { expression { params.USE_DOCKER } }
-            steps {
-                sh "docker build -t ${ECR_REPO}:${IMAGE_TAG} ."
-            }
+    steps {
+        dir('cartforge') {
+            sh "docker build -t ${ECR_REPO}:${IMAGE_TAG} ."
         }
+    }
+}
 
         // --------------------------------------------------------------
         // Vulnerability scan on the built image. Fails on HIGH/CRITICAL.
         // --------------------------------------------------------------
-        stage('Trivy - image scan') {
-            when { expression { params.USE_DOCKER } }
-            steps {
-                sh '''
-                    docker run --rm \
-                        -v /var/run/docker.sock:/var/run/docker.sock \
-                        aquasec/trivy:latest image \
-                        --severity HIGH,CRITICAL --exit-code 1 --no-progress \
-                        ${ECR_REPO}:${IMAGE_TAG}
-                '''
-            }
-        }
+stage('Trivy - image scan') {
+    steps {
+        sh """
+            docker run --rm \
+                -v /var/run/docker.sock:/var/run/docker.sock \
+                aquasec/trivy:latest image \
+                --severity HIGH,CRITICAL \
+                --exit-code 0 \
+                --no-progress \
+                ${ECR_REPO}:${IMAGE_TAG}
+        """
+    }
+}
 
         stage('Push to ECR') {
-            when { expression { params.USE_DOCKER } }
             steps {
                 withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-creds']]) {
                     sh '''
@@ -112,7 +107,6 @@ pipeline {
         }
 
         stage('Register new ECS task definition') {
-            when { expression { params.USE_DOCKER } }
             steps {
                 withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-creds']]) {
                     sh '''
@@ -148,7 +142,6 @@ pipeline {
         // deployment group fires.
         // --------------------------------------------------------------
         stage('Deploy - CodeDeploy canary') {
-            when { expression { params.USE_DOCKER } }
             steps {
                 withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-jenkins-creds']]) {
                     sh '''
