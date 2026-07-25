@@ -12,9 +12,9 @@
 set -euo pipefail
 
 AWS_REGION="us-east-1"
-VPC_ID="vpc-06df35f7d668b64a1"
-SUBNET_IDS="subnet-0b4b36ab3e084c5f2,subnet-0b5fed250cf90265a,subnet-03842953cc80edc98"
-SG_ID="sg-0a53e7118605951de"
+VPC_ID="vpc-0c4b5560433c9b0fe"
+SUBNET_IDS="subnet-0bc5a1ba7779ce97a,subnet-066c61423823932e5,subnet-0b895ff01ad9df2fb"
+SG_ID="sg-045f1c24a0d92e879"
 
 CLUSTER_NAME="cartforge-cluster"
 SERVICE_NAME="cartforge-service"
