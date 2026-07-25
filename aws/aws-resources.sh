@@ -223,6 +223,9 @@ else
     made "CloudWatch alarm $ALARM_NAME"
 fi
 
+aws logs create-log-group \
+    --log-group-name "/ecs/cartforge" \
+    --region us-east-1
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
