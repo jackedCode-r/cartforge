@@ -223,9 +223,27 @@ else
     made "CloudWatch alarm $ALARM_NAME"
 fi
 
-aws logs create-log-group \
-    --log-group-name "/ecs/cartforge" \
-    --region us-east-1
+LOG_GROUP="/ecs/cartforge"
+
+if aws logs describe-log-groups \
+    --log-group-name-prefix "$LOG_GROUP" \
+    --region "$AWS_REGION" \
+    --query 'logGroups[0].logGroupName' \
+    --output text 2>/dev/null | grep -q "$LOG_GROUP"
+then
+    echo "Log group already exists."
+else
+    aws logs create-log-group \
+        --log-group-name "$LOG_GROUP" \
+        --region "$AWS_REGION"
+
+    aws logs put-retention-policy \
+        --log-group-name "$LOG_GROUP" \
+        --retention-in-days 30 \
+        --region "$AWS_REGION"
+
+    echo "Created CloudWatch Log Group."
+fi
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
