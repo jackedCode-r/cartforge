@@ -4,11 +4,11 @@
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "256",
   "memory": "512",
-  "executionRoleArn": "arn:aws:iam::787107040536:role/ecsTaskExecutionRole",
+  "executionRoleArn": "arn:aws:iam::766691179872:role/ecsTaskExecutionRole",
   "containerDefinitions": [
     {
       "name": "cartforge",
-      "image": "787107040536.dkr.ecr.us-east-1.amazonaws.com/cartforge:latest",
+      "image": "766691179872.dkr.ecr.us-east-1.amazonaws.com/cartforge:latest",
       "essential": true,
       "portMappings": [
         {
